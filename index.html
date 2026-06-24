@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>対空砲シミュレーター - 完成版</title>
+    <style>
+        body { 
+            margin: 0; 
+            background: #111; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            color: white; 
+            font-family: sans-serif; 
+            overflow: hidden;
+        }
+        canvas { 
+            background: #1a2634; /* 夜空をイメージしたダークブルー */
+            border: 2px solid #3a4a5e; 
+            box-shadow: 0 0 20px rgba(0,0,0,0.8);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        // サーバーとのWebSocket接続を確立
+        const ws = new WebSocket(`ws://${window.location.host}`);
+        let serverState = null;
+
+        // サーバーからのデータ受信
+        ws.onmessage = (event) => {
+            serverState = JSON.parse(event.data);
+            draw();
+        };
+
+        // マウスの動きに合わせて砲台の角度を計算して送信
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+            
+            // 砲台ベース位置 (400, 550) からの相対角度
+            const angle = Math.atan2(mouseY - 550, mouseX - 400);
+            ws.send(JSON.stringify({ type: 'MOVE_GUN', angle: angle }));
+        });
+
+        // クリックで発射
+        canvas.addEventListener('click', () => {
+            ws.send(JSON.stringify({ type: 'FIRE' }));
+        });
+
+        // メイン描画処理
+        function draw() {
+            if (!serverState) return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // 背景に薄いグリッドを描画（速度感や距離感を掴みやすくするため）
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+            ctx.lineWidth = 1;
+            for(let i = 0; i < canvas.width; i += 50) {
+                ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(canvas.width, i); ctx.stroke();
+            }
+
+            // 1. 偏差射撃用：予測照準（リードマーカー）の計算と描画
+            if (serverState.target.alive) {
+                const gunX = serverState.gun.x;
+                const gunY = serverState.gun.y;
+                const targetX = serverState.target.x;
+                const targetY = serverState.target.y;
+                const targetVx = serverState.target.vx;
+                // ★ server.jsのBULLET_SPEED（18）と同期
+                const bulletSpeed = 18; 
+
+                // 砲台から現在の敵機までの大まかな距離と、弾道の飛行フレーム数を逆算
+                const distance = Math.hypot(targetX - gunX, targetY - gunY);
+                const timeToTarget = distance / bulletSpeed;
+
+                // 敵機の「未来の予測X座標」を算出
+                const futureX = targetX + (targetVx * timeToTarget);
+                const futureY = targetY;
+
+                // 予測照準（レティクル）の描画
+                ctx.strokeStyle = 'rgba(0, 255, 100, 0.5)';
+                ctx.lineWidth = 2;
+                
+                // 外円
+                ctx.beginPath();
+                ctx.arc(futureX, futureY, 15, 0, Math.PI * 2);
+                ctx.stroke();
+
+                // 十字
+                ctx.beginPath();
+                ctx.moveTo(futureX - 22, futureY); ctx.lineTo(futureX + 22, futureY);
+                ctx.moveTo(futureX, futureY - 22); ctx.lineTo(futureX, futureY + 22);
+                ctx.stroke();
+
+                // 現在地と予測地を繋ぐ予測線（点線）
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(targetX, targetY);
+                ctx.lineTo(futureX, futureY);
+                ctx.stroke();
+                ctx.setLineDash([]); // 点線リセット
+            }
+
+            // 2. 敵機（ターゲット）の描画
+            if (serverState.target.alive) {
+                ctx.fillStyle = '#ff3333';
+                ctx.beginPath();
+                ctx.arc(serverState.target.x, serverState.target.y, serverState.target.size, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // 機体の輪郭
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            } else {
+                // 撃墜時のテキストエフェクト
+                ctx.fillStyle = '#ffcc00';
+                ctx.font = 'bold 24px sans-serif';
+                ctx.fillText('💥 TARGET DESTROYED', serverState.target.x - 100, serverState.target.y);
+            }
+
+            // 3. 弾の描画（放物線軌道上のリアルタイム位置）
+            ctx.fillStyle = '#fffb00';
+            serverState.bullets.forEach(bullet => {
+                ctx.beginPath();
+                ctx.arc(bullet.x, bullet.y, 3.5, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // 4. 爆風（FLAK）の描画
+            serverState.explosions.forEach(exp => {
+                const alpha = exp.life / 20; // 残り寿命でフェードアウト
+                
+                // 外側の炎と煙
+                ctx.fillStyle = `rgba(255, 70, 0, ${alpha * 0.6})`;
+                ctx.beginPath();
+                ctx.arc(exp.x, exp.y, exp.radius, 0, Math.PI * 2);
+                ctx.fill();
+
+                // 中心部の閃光
+                ctx.fillStyle = `rgba(255, 230, 0, ${alpha})`;
+                ctx.beginPath();
+                ctx.arc(exp.x, exp.y, exp.radius * 0.4, 0, Math.PI * 2);
+                ctx.fill();
+            });
+
+            // 5. 砲台（AA Gun）の描画
+            ctx.save();
+            ctx.translate(serverState.gun.x, serverState.gun.y);
+            ctx.rotate(serverState.gun.angle);
+            ctx.fillStyle = '#95a5a6';
+            ctx.fillRect(0, -6, 45, 12); // 砲身
+            ctx.strokeStyle = '#7f8c8d';
+            ctx.strokeRect(0, -6, 45, 12);
+            ctx.restore();
+
+            // 砲台座
+            ctx.fillStyle = '#7f8c8d';
+            ctx.beginPath();
+            ctx.arc(serverState.gun.x, serverState.gun.y, 22, Math.PI, 0);
+            ctx.fill();
+        }
+    </script>
+</body>
+</html>
